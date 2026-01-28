@@ -3,9 +3,14 @@
 use crate::shm::SharedMemory;
 use crate::storage::StorageType;
 
-/// Buffer data storage (Phase 3: CPU only, Phase 4 添加 CUDA)
+#[cfg(feature = "cuda")]
+use crate::cuda::CudaBuffer;
+
+/// Buffer data storage
 pub enum BufferData {
     Cpu(SharedMemory),
+    #[cfg(feature = "cuda")]
+    Cuda(CudaBuffer),
 }
 
 impl BufferData {
@@ -13,6 +18,8 @@ impl BufferData {
     pub fn storage_type(&self) -> StorageType {
         match self {
             BufferData::Cpu(_) => StorageType::Cpu,
+            #[cfg(feature = "cuda")]
+            BufferData::Cuda(_) => StorageType::Cuda,
         }
     }
 
@@ -20,6 +27,8 @@ impl BufferData {
     pub fn size(&self) -> usize {
         match self {
             BufferData::Cpu(shm) => shm.size(),
+            #[cfg(feature = "cuda")]
+            BufferData::Cuda(buf) => buf.size(),
         }
     }
 
@@ -27,6 +36,8 @@ impl BufferData {
     pub fn as_cpu_ptr(&self) -> Option<*const u8> {
         match self {
             BufferData::Cpu(shm) => Some(shm.as_ptr()),
+            #[cfg(feature = "cuda")]
+            BufferData::Cuda(_) => None,
         }
     }
 
@@ -34,6 +45,26 @@ impl BufferData {
     pub fn as_cpu_mut_ptr(&mut self) -> Option<*mut u8> {
         match self {
             BufferData::Cpu(shm) => Some(shm.as_mut_ptr()),
+            #[cfg(feature = "cuda")]
+            BufferData::Cuda(_) => None,
+        }
+    }
+
+    /// Get CUDA device pointer (only for CUDA buffers)
+    #[cfg(feature = "cuda")]
+    pub fn as_cuda_ptr(&self) -> Option<u64> {
+        match self {
+            BufferData::Cpu(_) => None,
+            BufferData::Cuda(buf) => Some(buf.device_ptr()),
+        }
+    }
+
+    /// Get CUDA device ID (only for CUDA buffers)
+    #[cfg(feature = "cuda")]
+    pub fn cuda_device_id(&self) -> Option<i32> {
+        match self {
+            BufferData::Cpu(_) => None,
+            BufferData::Cuda(buf) => Some(buf.device_id()),
         }
     }
 }
