@@ -1,0 +1,16 @@
+[package]
+name = "xmem-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cross-process shared memory pool with CPU and CUDA support"
+
+[features]
+default = []
+cuda = ["dep:cudarc"]
+
+[dependencies]
+shared_memory = "0.12"
+cudarc = { version = "0.12", optional = true }
+thiserror = "2"
