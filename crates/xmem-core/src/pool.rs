@@ -151,3 +151,105 @@ impl BufferPool {
         Ok(meta.ref_count.load(Ordering::SeqCst))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unique_name() -> String {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        format!("/xmem_pool_test_{}", ts)
+    }
+
+    #[test]
+    fn test_create_pool() {
+        let name = unique_name();
+        let pool = BufferPool::create(&name).unwrap();
+        assert_eq!(pool.name(), name);
+        assert_eq!(pool.capacity(), DEFAULT_CAPACITY);
+    }
+
+    #[test]
+    fn test_acquire_cpu_buffer() {
+        let name = unique_name();
+        let pool = BufferPool::create(&name).unwrap();
+
+        let mut buf = pool.acquire_cpu(1024).unwrap();
+        assert_eq!(buf.meta_index(), 0);
+
+        // Write data
+        let data = b"hello";
+        buf.as_cpu_slice_mut().unwrap()[..data.len()].copy_from_slice(data);
+
+        // Read back
+        assert_eq!(&buf.as_cpu_slice().unwrap()[..data.len()], data);
+    }
+
+    #[test]
+    fn test_get_buffer() {
+        let name = unique_name();
+        let pool = BufferPool::create(&name).unwrap();
+
+        // Acquire and write
+        let mut buf = pool.acquire_cpu(1024).unwrap();
+        let meta_index = buf.meta_index();
+        buf.as_cpu_slice_mut().unwrap()[..5].copy_from_slice(b"hello");
+        pool.set_ref_count(meta_index, 2).unwrap(); // Keep alive after drop
+
+        // Get and read (original buf still alive, so shm exists)
+        let buf2 = pool.get(meta_index).unwrap();
+        assert_eq!(&buf2.as_cpu_slice().unwrap()[..5], b"hello");
+    }
+
+    #[test]
+    fn test_ref_count() {
+        let name = unique_name();
+        let pool = BufferPool::create(&name).unwrap();
+
+        let buf = pool.acquire_cpu(1024).unwrap();
+        let meta_index = buf.meta_index();
+
+        assert_eq!(pool.ref_count(meta_index).unwrap(), 1);
+
+        pool.add_ref(meta_index).unwrap();
+        assert_eq!(pool.ref_count(meta_index).unwrap(), 2);
+
+        pool.release(meta_index).unwrap();
+        assert_eq!(pool.ref_count(meta_index).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_read_only_guard() {
+        let name = unique_name();
+        let pool = BufferPool::create(&name).unwrap();
+
+        let buf = pool.acquire_cpu(1024).unwrap();
+        let meta_index = buf.meta_index();
+        pool.set_ref_count(meta_index, 2).unwrap();
+
+        // Get read-only (original buf still alive)
+        let mut buf2 = pool.get(meta_index).unwrap();
+        assert!(buf2.as_cpu_slice().is_ok());
+        assert!(buf2.as_cpu_slice_mut().is_err()); // Should fail
+    }
+
+    #[test]
+    fn test_forget() {
+        let name = unique_name();
+        let pool = BufferPool::create(&name).unwrap();
+
+        let meta_index;
+        {
+            let buf = pool.acquire_cpu(1024).unwrap();
+            meta_index = buf.meta_index();
+            buf.forget(); // Don't decrement ref count
+        }
+
+        // Ref count should still be 1
+        assert_eq!(pool.ref_count(meta_index).unwrap(), 1);
+    }
+}
