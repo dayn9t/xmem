@@ -75,3 +75,53 @@ impl SharedMemory {
         unsafe { std::slice::from_raw_parts_mut(self.as_mut_ptr(), self.size) }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unique_name() -> String {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        format!("/xmem_test_{}", ts)
+    }
+
+    #[test]
+    fn test_create_and_write() {
+        let name = unique_name();
+        let mut shm = SharedMemory::create(&name, 1024).unwrap();
+
+        assert_eq!(shm.size(), 1024);
+        assert_eq!(shm.name(), name);
+
+        // Write data
+        let data = b"hello xmem";
+        shm.as_mut_slice()[..data.len()].copy_from_slice(data);
+
+        // Read back
+        assert_eq!(&shm.as_slice()[..data.len()], data);
+    }
+
+    #[test]
+    fn test_open_existing() {
+        let name = unique_name();
+        let data = b"shared data";
+
+        // Create and write
+        let mut shm = SharedMemory::create(&name, 1024).unwrap();
+        shm.as_mut_slice()[..data.len()].copy_from_slice(data);
+
+        // Open and read (owner still alive)
+        let shm2 = SharedMemory::open(&name).unwrap();
+        assert_eq!(&shm2.as_slice()[..data.len()], data);
+    }
+
+    #[test]
+    fn test_open_nonexistent() {
+        let result = SharedMemory::open("/xmem_nonexistent_12345");
+        assert!(result.is_err());
+    }
+}
