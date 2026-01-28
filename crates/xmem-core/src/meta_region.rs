@@ -108,3 +108,78 @@ impl MetaRegion {
         Ok(unsafe { &mut *ptr })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    fn unique_name() -> String {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        format!("/xmem_meta_test_{}", ts)
+    }
+
+    #[test]
+    fn test_create_and_alloc() {
+        let name = unique_name();
+        let region = MetaRegion::create(&name, 10).unwrap();
+
+        assert_eq!(region.capacity(), 10);
+
+        // Allocate slots
+        let idx0 = region.alloc().unwrap();
+        let idx1 = region.alloc().unwrap();
+
+        assert_eq!(idx0, 0);
+        assert_eq!(idx1, 1);
+    }
+
+    #[test]
+    fn test_get_meta() {
+        let name = unique_name();
+        let mut region = MetaRegion::create(&name, 10).unwrap();
+
+        let idx = region.alloc().unwrap();
+        let meta = region.get_mut(idx).unwrap();
+
+        meta.id.store(42, Ordering::SeqCst);
+        meta.size.store(1024, Ordering::SeqCst);
+        meta.ref_count.store(1, Ordering::SeqCst);
+
+        // Read back
+        let meta = region.get(idx).unwrap();
+        assert_eq!(meta.id.load(Ordering::SeqCst), 42);
+        assert_eq!(meta.size.load(Ordering::SeqCst), 1024);
+        assert_eq!(meta.ref_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_open_existing() {
+        let name = unique_name();
+
+        // Create and write
+        let mut region = MetaRegion::create(&name, 10).unwrap();
+        let idx = region.alloc().unwrap();
+        let meta = region.get_mut(idx).unwrap();
+        meta.id.store(123, Ordering::SeqCst);
+
+        // Open and read (owner still alive)
+        let region2 = MetaRegion::open(&name).unwrap();
+        let meta = region2.get(0).unwrap();
+        assert_eq!(meta.id.load(Ordering::SeqCst), 123);
+    }
+
+    #[test]
+    fn test_capacity_limit() {
+        let name = unique_name();
+        let region = MetaRegion::create(&name, 2).unwrap();
+
+        assert!(region.alloc().is_ok());
+        assert!(region.alloc().is_ok());
+        assert!(region.alloc().is_err()); // Full
+    }
+}
