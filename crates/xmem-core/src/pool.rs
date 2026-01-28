@@ -110,7 +110,7 @@ impl BufferPool {
         // Increment ref count
         meta.ref_count.fetch_add(1, Ordering::SeqCst);
 
-        // Open buffer data based on storage type (Phase 3: CPU only)
+        // Open buffer data based on storage type
         let storage_type_val = meta.storage_type.load(Ordering::SeqCst);
         let storage_type = StorageType::from_u8(storage_type_val)
             .ok_or_else(|| Error::SharedMemory("invalid storage type".to_string()))?;
@@ -120,6 +120,20 @@ impl BufferPool {
                 let shm_name = self.buffer_shm_name(meta_index);
                 let shm = SharedMemory::open(&shm_name)?;
                 BufferData::Cpu(shm)
+            }
+            #[cfg(feature = "cuda")]
+            StorageType::Cuda => {
+                use crate::cuda::{CudaBuffer, CudaIpcHandle};
+
+                let mut handle = CudaIpcHandle::default();
+                handle.reserved.copy_from_slice(&meta.cuda_ipc_handle);
+
+                let cuda_buf = CudaBuffer::from_ipc_handle(
+                    meta.device_id.load(Ordering::SeqCst) as i32,
+                    &handle,
+                    meta.size.load(Ordering::SeqCst) as usize,
+                )?;
+                BufferData::Cuda(cuda_buf)
             }
         };
 
@@ -159,6 +173,63 @@ impl BufferPool {
             let buf = self.acquire_cpu(size)?;
             let meta_index = buf.meta_index();
             buf.forget(); // Keep buffer alive
+            indices.push(meta_index);
+        }
+
+        Ok(indices)
+    }
+
+    /// Acquire a new CUDA buffer
+    #[cfg(feature = "cuda")]
+    pub fn acquire_cuda(&self, size: usize, device_id: i32) -> Result<BufferGuard> {
+        use crate::cuda::CudaBuffer;
+
+        // Allocate metadata slot
+        let meta_index = self.meta_region.alloc()?;
+
+        // Allocate CUDA buffer
+        let cuda_buf = CudaBuffer::alloc(device_id, size)?;
+        let ipc_handle = cuda_buf.ipc_handle();
+
+        // Initialize metadata
+        let meta = self.meta_region.get(meta_index)?;
+        meta.id.store(meta_index, Ordering::SeqCst);
+        meta.ref_count.store(1, Ordering::SeqCst);
+        meta.storage_type.store(StorageType::Cuda as u8, Ordering::SeqCst);
+        meta.device_id.store(device_id as u8, Ordering::SeqCst);
+        meta.size.store(size as u64, Ordering::SeqCst);
+
+        // Copy IPC handle to metadata
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                ipc_handle.reserved.as_ptr(),
+                meta.cuda_ipc_handle.as_ptr() as *mut u8,
+                64,
+            );
+        }
+
+        let ref_count_ptr = &meta.ref_count as *const _;
+
+        // Create buffer data
+        let data = BufferData::Cuda(cuda_buf);
+
+        Ok(BufferGuard::new(
+            data,
+            meta_index,
+            AccessMode::ReadWrite,
+            ref_count_ptr,
+        ))
+    }
+
+    /// Preallocate CUDA buffers
+    #[cfg(feature = "cuda")]
+    pub fn preallocate_cuda(&self, size: usize, count: usize, device_id: i32) -> Result<Vec<u32>> {
+        let mut indices = Vec::with_capacity(count);
+
+        for _ in 0..count {
+            let buf = self.acquire_cuda(size, device_id)?;
+            let meta_index = buf.meta_index();
+            buf.forget();
             indices.push(meta_index);
         }
 
