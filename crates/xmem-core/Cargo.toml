@@ -9,8 +9,12 @@ description = "Cross-process shared memory pool with CPU and CUDA support"
 [features]
 default = []
 cuda = ["dep:cudarc"]
+integration = ["dep:nix"]
 
 [dependencies]
 shared_memory = "0.12"
 cudarc = { version = "0.12", optional = true }
+nix = { version = "0.28", optional = true }
 thiserror = "2"
+
+[dev-dependencies]
