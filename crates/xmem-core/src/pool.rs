@@ -150,6 +150,20 @@ impl BufferPool {
         let meta = self.meta_region.get(meta_index)?;
         Ok(meta.ref_count.load(Ordering::SeqCst))
     }
+
+    /// Preallocate CPU buffers
+    pub fn preallocate_cpu(&self, size: usize, count: usize) -> Result<Vec<u32>> {
+        let mut indices = Vec::with_capacity(count);
+
+        for _ in 0..count {
+            let buf = self.acquire_cpu(size)?;
+            let meta_index = buf.meta_index();
+            buf.forget(); // Keep buffer alive
+            indices.push(meta_index);
+        }
+
+        Ok(indices)
+    }
 }
 
 #[cfg(test)]
@@ -251,5 +265,19 @@ mod tests {
 
         // Ref count should still be 1
         assert_eq!(pool.ref_count(meta_index).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_preallocate_cpu() {
+        let name = unique_name();
+        let pool = BufferPool::create(&name).unwrap();
+
+        let indices = pool.preallocate_cpu(1024, 5).unwrap();
+        assert_eq!(indices.len(), 5);
+
+        // All should have ref_count = 1
+        for &idx in &indices {
+            assert_eq!(pool.ref_count(idx).unwrap(), 1);
+        }
     }
 }
