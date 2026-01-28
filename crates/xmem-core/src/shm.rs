@@ -1,9 +1,48 @@
-//! POSIX shared memory wrapper
+//! POSIX 共享内存封装
+//!
+//! 提供 [`SharedMemory`] 类型用于管理 POSIX 共享内存区域。
+//!
+//! # 示例
+//!
+//! ```
+//! use xmem_core::SharedMemory;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! // 创建新的共享内存
+//! let mut shm = SharedMemory::create("/my_shm", 1024)?;
+//! shm.as_mut_slice()[..5].copy_from_slice(b"hello");
+//!
+//! // 在其他进程中打开
+//! let shm = SharedMemory::open("/my_shm")?;
+//! println!("{:?}", std::str::from_utf8(shm.as_slice()).unwrap());
+//! # Ok(())
+//! # }
+//! ```
 
 use crate::{Error, Result};
 use shared_memory::{Shmem, ShmemConf};
 
-/// Shared memory region wrapper
+/// POSIX 共享内存区域封装
+///
+/// 包装 `shared_memory` crate，提供创建和打开共享内存的功能。
+///
+/// # 示例
+///
+/// ```
+/// use xmem_core::SharedMemory;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// // 创建
+/// let mut shm = SharedMemory::create("/test", 1024)?;
+///
+/// // 写入
+/// shm.as_mut_slice()?.copy_from_slice(b"data");
+///
+/// // 读取
+/// assert_eq!(shm.as_slice(), b"data");
+/// # Ok(())
+/// # }
+/// ```
 pub struct SharedMemory {
     inner: Shmem,
     name: String,
@@ -12,7 +51,23 @@ pub struct SharedMemory {
 }
 
 impl SharedMemory {
-    /// Create a new shared memory region
+    /// 创建新的共享内存区域
+    ///
+    /// # 参数
+    ///
+    /// - `name`: 共享内存名称（通常以 `/` 开头）
+    /// - `size`: 大小（字节）
+    ///
+    /// # 示例
+    ///
+    /// ```
+    /// use xmem_core::SharedMemory;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let shm = SharedMemory::create("/my_shm", 1024)?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn create(name: &str, size: usize) -> Result<Self> {
         let shmem = ShmemConf::new()
             .size(size)

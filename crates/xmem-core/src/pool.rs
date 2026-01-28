@@ -1,4 +1,26 @@
 //! Buffer pool management
+//!
+//! 提供 [`BufferPool`] 类型用于管理跨进程共享内存缓冲池。
+//!
+//! # 示例
+//!
+//! ```
+//! use xmem_core::BufferPool;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! // 创建新池
+//! let pool = BufferPool::create("/my_pool")?;
+//!
+//! // 分配 CPU buffer
+//! let mut buf = pool.acquire_cpu(1024)?;
+//! buf.as_cpu_slice_mut()?.copy_from_slice(b"hello");
+//!
+//! // 获取已存在的 buffer
+//! let buf = pool.get(0)?;
+//! let data = buf.as_cpu_slice()?;
+//! # Ok(())
+//! # }
+//! ```
 
 use crate::buffer::BufferData;
 use crate::guard::BufferGuard;
@@ -11,7 +33,28 @@ use std::sync::atomic::Ordering;
 /// Default metadata region capacity
 const DEFAULT_CAPACITY: usize = 1024;
 
-/// Buffer pool for managing shared memory buffers
+/// 跨进程共享内存缓冲池
+///
+/// 管理共享内存缓冲区的分配、访问和生命周期。
+///
+/// # 示例
+///
+/// ```
+/// use xmem_core::BufferPool;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// // 创建新池
+/// let pool = BufferPool::create("/my_pool")?;
+///
+/// // 分配 buffer
+/// let mut buf = pool.acquire_cpu(1024)?;
+/// let idx = buf.meta_index();
+///
+/// // 传递 idx 给其他进程，然后打开
+/// let buf = pool.get(idx)?;
+/// # Ok(())
+/// # }
+/// ```
 pub struct BufferPool {
     /// Pool name
     name: String,
@@ -20,12 +63,32 @@ pub struct BufferPool {
 }
 
 impl BufferPool {
-    /// Create a new buffer pool
+    /// 创建一个新的缓冲池
+    ///
+    /// # 参数
+    ///
+    /// - `name`: 池名称，用于标识共享内存区域
+    ///
+    /// # 示例
+    ///
+    /// ```
+    /// use xmem_core::BufferPool;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let pool = BufferPool::create("/my_pool")?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn create(name: &str) -> Result<Self> {
         Self::create_with_capacity(name, DEFAULT_CAPACITY)
     }
 
-    /// Create a new buffer pool with specified capacity
+    /// 创建指定容量的缓冲池
+    ///
+    /// # 参数
+    ///
+    /// - `name`: 池名称
+    /// - `capacity`: 最大 buffer 数量
     pub fn create_with_capacity(name: &str, capacity: usize) -> Result<Self> {
         let meta_name = format!("{}_meta", name);
         let meta_region = MetaRegion::create(&meta_name, capacity)?;
