@@ -1,0 +1,19 @@
+[package]
+name = "xmem-python"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Python bindings for xmem shared memory pool"
+
+[lib]
+name = "xmem"
+crate-type = ["cdylib"]
+
+[features]
+default = []
+cuda = ["xmem-core/cuda"]
+
+[dependencies]
+xmem-core = { path = "../xmem-core" }
+pyo3 = { version = "0.20", features = ["extension-module"] }
