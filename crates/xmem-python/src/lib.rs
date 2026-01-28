@@ -145,6 +145,124 @@ impl BufferPool {
     }
 }
 
+#[pymethods]
+impl BufferGuard {
+    /// Get metadata index
+    #[getter]
+    fn meta_index(&self) -> u32 {
+        self.meta_index
+    }
+
+    /// Check if buffer is valid (not forgotten)
+    #[getter]
+    fn is_valid(&self) -> bool {
+        !self.forgotten
+    }
+
+    /// Get CPU pointer as integer (按需创建临时 guard)
+    #[getter]
+    fn cpu_ptr(&self) -> PyResult<u64> {
+        if self.forgotten {
+            return Err(PyRuntimeError::new_err("buffer already forgotten"));
+        }
+        let guard = self.pool.get(self.meta_index).map_err(to_py_err)?;
+        let slice = guard.as_cpu_slice().map_err(to_py_err)?;
+        let ptr = slice.as_ptr() as u64;
+        guard.forget(); // 不减少引用计数
+        Ok(ptr)
+    }
+
+    /// Get CPU pointer as integer (mutable)
+    #[getter]
+    fn cpu_ptr_mut(&self) -> PyResult<u64> {
+        if self.forgotten {
+            return Err(PyRuntimeError::new_err("buffer already forgotten"));
+        }
+        if self.mode == AccessMode::ReadOnly {
+            return Err(PyRuntimeError::new_err("buffer is read-only"));
+        }
+        let mut guard = self.pool.get_mut(self.meta_index).map_err(to_py_err)?;
+        let slice = guard.as_cpu_slice_mut().map_err(to_py_err)?;
+        let ptr = slice.as_mut_ptr() as u64;
+        guard.forget();
+        Ok(ptr)
+    }
+
+    /// Get CUDA device pointer
+    #[cfg(feature = "cuda")]
+    #[getter]
+    fn cuda_ptr(&self) -> PyResult<u64> {
+        if self.forgotten {
+            return Err(PyRuntimeError::new_err("buffer already forgotten"));
+        }
+        let guard = self.pool.get(self.meta_index).map_err(to_py_err)?;
+        let ptr = guard.as_cuda_ptr().map_err(to_py_err)?;
+        guard.forget();
+        Ok(ptr)
+    }
+
+    /// Get CUDA device pointer (mutable)
+    #[cfg(feature = "cuda")]
+    #[getter]
+    fn cuda_ptr_mut(&self) -> PyResult<u64> {
+        if self.forgotten {
+            return Err(PyRuntimeError::new_err("buffer already forgotten"));
+        }
+        if self.mode == AccessMode::ReadOnly {
+            return Err(PyRuntimeError::new_err("buffer is read-only"));
+        }
+        let mut guard = self.pool.get_mut(self.meta_index).map_err(to_py_err)?;
+        let ptr = guard.as_cuda_ptr_mut().map_err(to_py_err)?;
+        guard.forget();
+        Ok(ptr)
+    }
+
+    /// Get buffer size
+    #[getter]
+    fn size(&self) -> PyResult<usize> {
+        if self.forgotten {
+            return Err(PyRuntimeError::new_err("buffer already forgotten"));
+        }
+        let guard = self.pool.get(self.meta_index).map_err(to_py_err)?;
+        let slice = guard.as_cpu_slice().map_err(to_py_err)?;
+        let size = slice.len();
+        guard.forget();
+        Ok(size)
+    }
+
+    /// Forget this guard without releasing
+    fn forget(&mut self) {
+        self.forgotten = true;
+    }
+
+    /// Context manager enter
+    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    /// Context manager exit - release reference
+    fn __exit__(
+        &mut self,
+        _exc_type: Option<&PyAny>,
+        _exc_val: Option<&PyAny>,
+        _exc_tb: Option<&PyAny>,
+    ) -> bool {
+        if !self.forgotten {
+            let _ = self.pool.release(self.meta_index);
+            self.forgotten = true;
+        }
+        false
+    }
+}
+
+impl Drop for BufferGuard {
+    fn drop(&mut self) {
+        if !self.forgotten {
+            let _ = self.pool.release(self.meta_index);
+        }
+    }
+}
+
 #[pymodule]
 fn xmem(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<BufferPool>()?;
