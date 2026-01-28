@@ -40,16 +40,19 @@ pyo3 = { version = "0.20", features = ["extension-module"] }
 
 **Step 2: 创建 src/lib.rs 基础结构**
 
+> **生命周期设计说明**：Python 绑定中 `BufferGuard` 不能直接持有 Rust 的 `CoreGuard<'a>`，
+> 因为 Python 对象的生命周期由 GC 管理。解决方案：
+> 1. `PyBufferPool` 使用 `Arc<CorePool>` 包装
+> 2. `PyBufferGuard` 持有 `Arc<CorePool>` 的克隆 + `meta_index`
+> 3. 访问时按需创建临时 `CoreGuard`
+
 ```rust
 //! Python bindings for xmem
 
 use pyo3::prelude::*;
 use pyo3::exceptions::PyRuntimeError;
-use xmem_core::{
-    BufferPool as CorePool,
-    BufferGuard as CoreGuard,
-    AccessMode,
-};
+use std::sync::Arc;
+use xmem_core::{BufferPool as CorePool, AccessMode};
 
 /// Convert xmem error to Python exception
 fn to_py_err(e: xmem_core::Error) -> PyErr {
@@ -59,14 +62,19 @@ fn to_py_err(e: xmem_core::Error) -> PyErr {
 /// Python wrapper for BufferPool
 #[pyclass]
 struct BufferPool {
-    inner: CorePool,
+    inner: Arc<CorePool>,
 }
 
 /// Python wrapper for BufferGuard
+///
+/// 持有 pool 的 Arc 引用，确保 pool 在 guard 存活期间不会被释放
 #[pyclass]
 struct BufferGuard {
-    inner: Option<CoreGuard>,
+    pool: Arc<CorePool>,
     meta_index: u32,
+    mode: AccessMode,
+    /// 是否已调用 forget()
+    forgotten: bool,
 }
 
 #[pymodule]
@@ -98,8 +106,6 @@ git commit -m "feat(python): init xmem-python crate"
 
 **Step 1: 实现 BufferPool 方法**
 
-替换 `BufferPool` 实现：
-
 ```rust
 #[pymethods]
 impl BufferPool {
@@ -109,14 +115,14 @@ impl BufferPool {
     fn new(name: &str, capacity: usize) -> PyResult<Self> {
         let inner = CorePool::create_with_capacity(name, capacity)
             .map_err(to_py_err)?;
-        Ok(Self { inner })
+        Ok(Self { inner: Arc::new(inner) })
     }
 
     /// Open an existing buffer pool
     #[staticmethod]
     fn open(name: &str) -> PyResult<Self> {
         let inner = CorePool::open(name).map_err(to_py_err)?;
-        Ok(Self { inner })
+        Ok(Self { inner: Arc::new(inner) })
     }
 
     /// Get pool name
@@ -133,11 +139,16 @@ impl BufferPool {
 
     /// Acquire a CPU buffer
     fn acquire_cpu(&self, size: usize) -> PyResult<BufferGuard> {
+        // 先获取 guard 以分配 buffer，然后立即 forget 以转移所有权
         let guard = self.inner.acquire_cpu(size).map_err(to_py_err)?;
         let meta_index = guard.meta_index();
+        guard.forget(); // 不减少引用计数，由 PyBufferGuard 管理
+
         Ok(BufferGuard {
-            inner: Some(guard),
+            pool: Arc::clone(&self.inner),
             meta_index,
+            mode: AccessMode::ReadWrite,
+            forgotten: false,
         })
     }
 
@@ -146,9 +157,13 @@ impl BufferPool {
     fn acquire_cuda(&self, size: usize, device_id: i32) -> PyResult<BufferGuard> {
         let guard = self.inner.acquire_cuda(size, device_id).map_err(to_py_err)?;
         let meta_index = guard.meta_index();
+        guard.forget();
+
         Ok(BufferGuard {
-            inner: Some(guard),
+            pool: Arc::clone(&self.inner),
             meta_index,
+            mode: AccessMode::ReadWrite,
+            forgotten: false,
         })
     }
 
@@ -165,19 +180,26 @@ impl BufferPool {
 
     /// Get a buffer (read-only)
     fn get(&self, meta_index: u32) -> PyResult<BufferGuard> {
-        let guard = self.inner.get(meta_index).map_err(to_py_err)?;
+        // 验证 buffer 存在并增加引用计数
+        self.inner.add_ref(meta_index).map_err(to_py_err)?;
+
         Ok(BufferGuard {
-            inner: Some(guard),
+            pool: Arc::clone(&self.inner),
             meta_index,
+            mode: AccessMode::ReadOnly,
+            forgotten: false,
         })
     }
 
     /// Get a buffer (read-write)
     fn get_mut(&self, meta_index: u32) -> PyResult<BufferGuard> {
-        let guard = self.inner.get_mut(meta_index).map_err(to_py_err)?;
+        self.inner.add_ref(meta_index).map_err(to_py_err)?;
+
         Ok(BufferGuard {
-            inner: Some(guard),
+            pool: Arc::clone(&self.inner),
             meta_index,
+            mode: AccessMode::ReadWrite,
+            forgotten: false,
         })
     }
 
@@ -224,8 +246,6 @@ git commit -m "feat(python): implement BufferPool bindings"
 
 **Step 1: 实现 BufferGuard 方法**
 
-添加 `BufferGuard` 实现：
-
 ```rust
 #[pymethods]
 impl BufferGuard {
@@ -235,62 +255,86 @@ impl BufferGuard {
         self.meta_index
     }
 
-    /// Check if buffer is valid
+    /// Check if buffer is valid (not forgotten)
     #[getter]
     fn is_valid(&self) -> bool {
-        self.inner.is_some()
+        !self.forgotten
     }
 
-    /// Get CPU pointer as integer
+    /// Get CPU pointer as integer (按需创建临时 guard)
     #[getter]
     fn cpu_ptr(&self) -> PyResult<u64> {
-        let guard = self.inner.as_ref()
-            .ok_or_else(|| PyRuntimeError::new_err("buffer already forgotten"))?;
+        if self.forgotten {
+            return Err(PyRuntimeError::new_err("buffer already forgotten"));
+        }
+        let guard = self.pool.get(self.meta_index).map_err(to_py_err)?;
         let slice = guard.as_cpu_slice().map_err(to_py_err)?;
-        Ok(slice.as_ptr() as u64)
+        let ptr = slice.as_ptr() as u64;
+        guard.forget(); // 不减少引用计数
+        Ok(ptr)
     }
 
     /// Get CPU pointer as integer (mutable)
     #[getter]
-    fn cpu_ptr_mut(&mut self) -> PyResult<u64> {
-        let guard = self.inner.as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("buffer already forgotten"))?;
+    fn cpu_ptr_mut(&self) -> PyResult<u64> {
+        if self.forgotten {
+            return Err(PyRuntimeError::new_err("buffer already forgotten"));
+        }
+        if self.mode == AccessMode::ReadOnly {
+            return Err(PyRuntimeError::new_err("buffer is read-only"));
+        }
+        let mut guard = self.pool.get_mut(self.meta_index).map_err(to_py_err)?;
         let slice = guard.as_cpu_slice_mut().map_err(to_py_err)?;
-        Ok(slice.as_mut_ptr() as u64)
+        let ptr = slice.as_mut_ptr() as u64;
+        guard.forget();
+        Ok(ptr)
     }
 
     /// Get CUDA device pointer
     #[cfg(feature = "cuda")]
     #[getter]
     fn cuda_ptr(&self) -> PyResult<u64> {
-        let guard = self.inner.as_ref()
-            .ok_or_else(|| PyRuntimeError::new_err("buffer already forgotten"))?;
-        guard.as_cuda_ptr().map_err(to_py_err)
+        if self.forgotten {
+            return Err(PyRuntimeError::new_err("buffer already forgotten"));
+        }
+        let guard = self.pool.get(self.meta_index).map_err(to_py_err)?;
+        let ptr = guard.as_cuda_ptr().map_err(to_py_err)?;
+        guard.forget();
+        Ok(ptr)
     }
 
     /// Get CUDA device pointer (mutable)
     #[cfg(feature = "cuda")]
     #[getter]
-    fn cuda_ptr_mut(&mut self) -> PyResult<u64> {
-        let guard = self.inner.as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("buffer already forgotten"))?;
-        guard.as_cuda_ptr_mut().map_err(to_py_err)
+    fn cuda_ptr_mut(&self) -> PyResult<u64> {
+        if self.forgotten {
+            return Err(PyRuntimeError::new_err("buffer already forgotten"));
+        }
+        if self.mode == AccessMode::ReadOnly {
+            return Err(PyRuntimeError::new_err("buffer is read-only"));
+        }
+        let mut guard = self.pool.get_mut(self.meta_index).map_err(to_py_err)?;
+        let ptr = guard.as_cuda_ptr_mut().map_err(to_py_err)?;
+        guard.forget();
+        Ok(ptr)
     }
 
     /// Get buffer size
     #[getter]
     fn size(&self) -> PyResult<usize> {
-        let guard = self.inner.as_ref()
-            .ok_or_else(|| PyRuntimeError::new_err("buffer already forgotten"))?;
+        if self.forgotten {
+            return Err(PyRuntimeError::new_err("buffer already forgotten"));
+        }
+        let guard = self.pool.get(self.meta_index).map_err(to_py_err)?;
         let slice = guard.as_cpu_slice().map_err(to_py_err)?;
-        Ok(slice.len())
+        let size = slice.len();
+        guard.forget();
+        Ok(size)
     }
 
     /// Forget this guard without releasing
     fn forget(&mut self) {
-        if let Some(guard) = self.inner.take() {
-            guard.forget();
-        }
+        self.forgotten = true;
     }
 
     /// Context manager enter
@@ -298,16 +342,26 @@ impl BufferGuard {
         slf
     }
 
-    /// Context manager exit
+    /// Context manager exit - release reference
     fn __exit__(
         &mut self,
         _exc_type: Option<&PyAny>,
         _exc_val: Option<&PyAny>,
         _exc_tb: Option<&PyAny>,
     ) -> bool {
-        // Drop will handle release
-        self.inner = None;
+        if !self.forgotten {
+            let _ = self.pool.release(self.meta_index);
+            self.forgotten = true;
+        }
         false
+    }
+}
+
+impl Drop for BufferGuard {
+    fn drop(&mut self) {
+        if !self.forgotten {
+            let _ = self.pool.release(self.meta_index);
+        }
     }
 }
 ```

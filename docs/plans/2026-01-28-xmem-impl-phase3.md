@@ -16,20 +16,17 @@
 
 **Step 1: 创建 buffer.rs**
 
+> 注意：此阶段只实现 CPU 部分，CUDA 支持在 Phase 4 添加。
+
 ```rust
 //! Buffer handle and storage
 
 use crate::shm::SharedMemory;
 use crate::storage::StorageType;
 
-#[cfg(feature = "cuda")]
-use crate::cuda::CudaBuffer;
-
-/// Buffer data storage
+/// Buffer data storage (Phase 3: CPU only, Phase 4 添加 CUDA)
 pub enum BufferData {
     Cpu(SharedMemory),
-    #[cfg(feature = "cuda")]
-    Cuda(CudaBuffer),
 }
 
 impl BufferData {
@@ -37,8 +34,6 @@ impl BufferData {
     pub fn storage_type(&self) -> StorageType {
         match self {
             BufferData::Cpu(_) => StorageType::Cpu,
-            #[cfg(feature = "cuda")]
-            BufferData::Cuda(_) => StorageType::Cuda,
         }
     }
 
@@ -46,8 +41,6 @@ impl BufferData {
     pub fn size(&self) -> usize {
         match self {
             BufferData::Cpu(shm) => shm.size(),
-            #[cfg(feature = "cuda")]
-            BufferData::Cuda(buf) => buf.size(),
         }
     }
 
@@ -55,8 +48,6 @@ impl BufferData {
     pub fn as_cpu_ptr(&self) -> Option<*const u8> {
         match self {
             BufferData::Cpu(shm) => Some(shm.as_ptr()),
-            #[cfg(feature = "cuda")]
-            BufferData::Cuda(_) => None,
         }
     }
 
@@ -64,17 +55,6 @@ impl BufferData {
     pub fn as_cpu_mut_ptr(&mut self) -> Option<*mut u8> {
         match self {
             BufferData::Cpu(shm) => Some(shm.as_mut_ptr()),
-            #[cfg(feature = "cuda")]
-            BufferData::Cuda(_) => None,
-        }
-    }
-
-    /// Get CUDA device pointer (only for CUDA buffers)
-    #[cfg(feature = "cuda")]
-    pub fn as_cuda_ptr(&self) -> Option<u64> {
-        match self {
-            BufferData::Cpu(_) => None,
-            BufferData::Cuda(buf) => Some(buf.device_ptr()),
         }
     }
 }
@@ -301,14 +281,11 @@ git commit -m "feat(core): add BufferGuard RAII wrapper"
 
 use crate::buffer::BufferData;
 use crate::guard::BufferGuard;
-use crate::meta::BufferMeta;
 use crate::meta_region::MetaRegion;
 use crate::shm::SharedMemory;
 use crate::storage::{AccessMode, StorageType};
 use crate::{Error, Result};
-use std::collections::HashMap;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, RwLock};
 
 /// Default metadata region capacity
 const DEFAULT_CAPACITY: usize = 1024;
@@ -319,8 +296,6 @@ pub struct BufferPool {
     name: String,
     /// Metadata region
     meta_region: MetaRegion,
-    /// Cached buffer data (meta_index -> BufferData)
-    buffers: RwLock<HashMap<u32, Arc<BufferData>>>,
 }
 
 impl BufferPool {
@@ -337,7 +312,6 @@ impl BufferPool {
         Ok(Self {
             name: name.to_string(),
             meta_region,
-            buffers: RwLock::new(HashMap::new()),
         })
     }
 
@@ -349,7 +323,6 @@ impl BufferPool {
         Ok(Self {
             name: name.to_string(),
             meta_region,
-            buffers: RwLock::new(HashMap::new()),
         })
     }
 
@@ -377,34 +350,17 @@ impl BufferPool {
         let shm_name = self.buffer_shm_name(meta_index);
         let shm = SharedMemory::create(&shm_name, size)?;
 
-        // Initialize metadata
-        // Safety: we just allocated this slot, no one else has access yet
-        let meta_region_ptr = &self.meta_region as *const MetaRegion as *mut MetaRegion;
-        let meta = unsafe { (*meta_region_ptr).get_mut(meta_index)? };
-        meta.id = meta_index;
+        // Initialize metadata (通过共享内存直接写入，无需 unsafe 绕过借用检查)
+        let meta = self.meta_region.get(meta_index)?;
+        meta.id.store(meta_index, Ordering::SeqCst);
         meta.ref_count.store(1, Ordering::SeqCst);
-        meta.storage_type = StorageType::Cpu as u8;
-        meta.device_id = 0;
-        meta.size = size as u64;
+        meta.storage_type.store(StorageType::Cpu as u8, Ordering::SeqCst);
+        meta.device_id.store(0, Ordering::SeqCst);
+        meta.size.store(size as u64, Ordering::SeqCst);
 
         let ref_count_ptr = &meta.ref_count as *const _;
 
         // Create buffer data
-        let data = BufferData::Cpu(shm);
-
-        // Cache it
-        {
-            let mut buffers = self.buffers.write().unwrap();
-            buffers.insert(meta_index, Arc::new(data));
-        }
-
-        // Get the cached data for the guard
-        let buffers = self.buffers.read().unwrap();
-        let data_arc = buffers.get(&meta_index).unwrap().clone();
-
-        // Create a new BufferData for the guard (we need ownership)
-        let shm_name = self.buffer_shm_name(meta_index);
-        let shm = SharedMemory::open(&shm_name)?;
         let data = BufferData::Cpu(shm);
 
         Ok(BufferGuard::new(
@@ -433,8 +389,9 @@ impl BufferPool {
         // Increment ref count
         meta.ref_count.fetch_add(1, Ordering::SeqCst);
 
-        // Open buffer data based on storage type
-        let storage_type = StorageType::from_u8(meta.storage_type)
+        // Open buffer data based on storage type (Phase 3: CPU only)
+        let storage_type_val = meta.storage_type.load(Ordering::SeqCst);
+        let storage_type = StorageType::from_u8(storage_type_val)
             .ok_or_else(|| Error::SharedMemory("invalid storage type".to_string()))?;
 
         let data = match storage_type {
@@ -442,11 +399,6 @@ impl BufferPool {
                 let shm_name = self.buffer_shm_name(meta_index);
                 let shm = SharedMemory::open(&shm_name)?;
                 BufferData::Cpu(shm)
-            }
-            #[cfg(feature = "cuda")]
-            StorageType::Cuda => {
-                // TODO: implement CUDA buffer opening
-                return Err(Error::SharedMemory("CUDA not implemented yet".to_string()));
             }
         };
 
@@ -459,6 +411,25 @@ impl BufferPool {
         meta.ref_count.store(count, Ordering::SeqCst);
         Ok(())
     }
+
+    /// Add reference to a buffer
+    pub fn add_ref(&self, meta_index: u32) -> Result<i32> {
+        let meta = self.meta_region.get(meta_index)?;
+        Ok(meta.ref_count.fetch_add(1, Ordering::SeqCst) + 1)
+    }
+
+    /// Release a buffer (decrement ref count)
+    pub fn release(&self, meta_index: u32) -> Result<i32> {
+        let meta = self.meta_region.get(meta_index)?;
+        Ok(meta.ref_count.fetch_sub(1, Ordering::SeqCst) - 1)
+    }
+
+    /// Get current reference count
+    pub fn ref_count(&self, meta_index: u32) -> Result<i32> {
+        let meta = self.meta_region.get(meta_index)?;
+        Ok(meta.ref_count.load(Ordering::SeqCst))
+    }
+}
 
     /// Add reference to a buffer
     pub fn add_ref(&self, meta_index: u32) -> Result<i32> {

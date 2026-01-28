@@ -238,7 +238,7 @@ git commit -m "feat(core): add CudaBuffer with IPC support"
 **Files:**
 - Modify: `crates/xmem-core/src/buffer.rs`
 
-**Step 1: 更新 buffer.rs**
+**Step 1: 更新 buffer.rs 添加 CUDA 支持**
 
 ```rust
 //! Buffer handle and storage
@@ -327,92 +327,7 @@ git commit -m "feat(core): update BufferData for CUDA support"
 
 ---
 
-## Task 3: 更新 BufferMeta 支持 CUDA IPC Handle
-
-**Files:**
-- Modify: `crates/xmem-core/src/meta.rs`
-
-**Step 1: 更新 meta.rs**
-
-```rust
-//! Buffer metadata structure
-
-use std::sync::atomic::AtomicI32;
-
-/// Maximum number of dimensions
-pub const MAX_NDIM: usize = 8;
-
-/// CUDA IPC handle size
-pub const CUDA_IPC_HANDLE_SIZE: usize = 64;
-
-/// Buffer metadata stored in shared memory
-#[repr(C)]
-pub struct BufferMeta {
-    /// Unique buffer ID
-    pub id: u32,
-    /// Reference count (atomic)
-    pub ref_count: AtomicI32,
-    /// Storage type: 0=cpu, 1=cuda
-    pub storage_type: u8,
-    /// GPU device ID (for CUDA)
-    pub device_id: u8,
-    /// Data type
-    pub dtype: u8,
-    /// Number of dimensions
-    pub ndim: u8,
-    /// Shape (up to 8 dimensions)
-    pub shape: [u64; MAX_NDIM],
-    /// Strides in bytes
-    pub strides: [u64; MAX_NDIM],
-    /// Total size in bytes
-    pub size: u64,
-    /// Timestamp (milliseconds since epoch)
-    pub timestamp: u64,
-    /// Sequence number
-    pub seq: u64,
-    /// Content type string (null-terminated)
-    pub content_type: [u8; 32],
-    /// Producer name (null-terminated)
-    pub producer: [u8; 32],
-    /// CUDA IPC handle (only valid when storage_type == 1)
-    pub cuda_ipc_handle: [u8; CUDA_IPC_HANDLE_SIZE],
-    /// Reserved for future use
-    pub reserved: [u8; 64],
-}
-
-impl BufferMeta {
-    /// Size of BufferMeta in bytes
-    pub const SIZE: usize = std::mem::size_of::<Self>();
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_meta_size() {
-        // Ensure struct size is stable for cross-process compatibility
-        assert!(BufferMeta::SIZE > 0);
-        println!("BufferMeta size: {} bytes", BufferMeta::SIZE);
-    }
-}
-```
-
-**Step 2: 验证编译**
-
-Run: `cargo check`
-Expected: PASS
-
-**Step 3: Commit**
-
-```bash
-git add crates/xmem-core/src/meta.rs
-git commit -m "feat(core): add cuda_ipc_handle to BufferMeta"
-```
-
----
-
-## Task 4: 更新 BufferPool 支持 CUDA
+## Task 3: 更新 BufferPool 支持 CUDA
 
 **Files:**
 - Modify: `crates/xmem-core/src/pool.rs`
@@ -425,7 +340,7 @@ git commit -m "feat(core): add cuda_ipc_handle to BufferMeta"
     /// Acquire a new CUDA buffer
     #[cfg(feature = "cuda")]
     pub fn acquire_cuda(&self, size: usize, device_id: i32) -> Result<BufferGuard> {
-        use crate::cuda::{CudaBuffer, CudaIpcHandle};
+        use crate::cuda::CudaBuffer;
 
         // Allocate metadata slot
         let meta_index = self.meta_region.alloc()?;
@@ -435,14 +350,21 @@ git commit -m "feat(core): add cuda_ipc_handle to BufferMeta"
         let ipc_handle = cuda_buf.ipc_handle();
 
         // Initialize metadata
-        let meta_region_ptr = &self.meta_region as *const MetaRegion as *mut MetaRegion;
-        let meta = unsafe { (*meta_region_ptr).get_mut(meta_index)? };
-        meta.id = meta_index;
+        let meta = self.meta_region.get(meta_index)?;
+        meta.id.store(meta_index, Ordering::SeqCst);
         meta.ref_count.store(1, Ordering::SeqCst);
-        meta.storage_type = StorageType::Cuda as u8;
-        meta.device_id = device_id as u8;
-        meta.size = size as u64;
-        meta.cuda_ipc_handle.copy_from_slice(&ipc_handle.reserved);
+        meta.storage_type.store(StorageType::Cuda as u8, Ordering::SeqCst);
+        meta.device_id.store(device_id as u8, Ordering::SeqCst);
+        meta.size.store(size as u64, Ordering::SeqCst);
+
+        // Copy IPC handle to metadata (需要 unsafe 写入固定大小数组)
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                ipc_handle.reserved.as_ptr(),
+                meta.cuda_ipc_handle.as_mut_ptr(),
+                64,
+            );
+        }
 
         let ref_count_ptr = &meta.ref_count as *const _;
 
@@ -487,7 +409,8 @@ git commit -m "feat(core): add cuda_ipc_handle to BufferMeta"
         meta.ref_count.fetch_add(1, Ordering::SeqCst);
 
         // Open buffer data based on storage type
-        let storage_type = StorageType::from_u8(meta.storage_type)
+        let storage_type_val = meta.storage_type.load(Ordering::SeqCst);
+        let storage_type = StorageType::from_u8(storage_type_val)
             .ok_or_else(|| Error::SharedMemory("invalid storage type".to_string()))?;
 
         let data = match storage_type {
@@ -504,9 +427,9 @@ git commit -m "feat(core): add cuda_ipc_handle to BufferMeta"
                 handle.reserved.copy_from_slice(&meta.cuda_ipc_handle);
 
                 let cuda_buf = CudaBuffer::from_ipc_handle(
-                    meta.device_id as i32,
+                    meta.device_id.load(Ordering::SeqCst) as i32,
                     &handle,
-                    meta.size as usize,
+                    meta.size.load(Ordering::SeqCst) as usize,
                 )?;
                 BufferData::Cuda(cuda_buf)
             }
@@ -530,7 +453,7 @@ git commit -m "feat(core): add CUDA support to BufferPool"
 
 ---
 
-## Task 5: CUDA 单元测试
+## Task 4: CUDA 单元测试
 
 **Files:**
 - Modify: `crates/xmem-core/src/pool.rs`
@@ -618,10 +541,10 @@ crates/xmem-core/src/
 ├── error.rs
 ├── dtype.rs
 ├── storage.rs
-├── meta.rs         # UPDATED (cuda_ipc_handle)
+├── meta.rs
 ├── shm.rs
 ├── meta_region.rs
-├── buffer.rs       # UPDATED
+├── buffer.rs       # UPDATED (添加 CUDA variant)
 ├── guard.rs
 ├── pool.rs         # UPDATED (CUDA methods)
 └── cuda.rs         # NEW
