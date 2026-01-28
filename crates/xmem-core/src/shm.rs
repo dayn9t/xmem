@@ -129,6 +129,11 @@ impl SharedMemory {
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         unsafe { std::slice::from_raw_parts_mut(self.as_mut_ptr(), self.size) }
     }
+
+    /// Check if this process is the owner (creator) of the shared memory
+    pub fn is_owner(&self) -> bool {
+        self.owner
+    }
 }
 
 #[cfg(test)]
