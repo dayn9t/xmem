@@ -352,3 +352,58 @@ mod tests {
         }
     }
 }
+
+#[cfg(all(test, feature = "cuda"))]
+mod cuda_tests {
+    use super::*;
+
+    fn unique_name() -> String {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        format!("/xmem_cuda_test_{}", ts)
+    }
+
+    #[test]
+    fn test_acquire_cuda_buffer() {
+        let name = unique_name();
+        let pool = BufferPool::create(&name).unwrap();
+
+        let buf = pool.acquire_cuda(1024, 0).unwrap();
+        assert_eq!(buf.meta_index(), 0);
+
+        let ptr = buf.as_cuda_ptr().unwrap();
+        assert!(ptr > 0);
+    }
+
+    #[test]
+    fn test_cuda_ipc() {
+        let name = unique_name();
+        let pool = BufferPool::create(&name).unwrap();
+
+        // Acquire CUDA buffer
+        let buf = pool.acquire_cuda(1024, 0).unwrap();
+        let meta_index = buf.meta_index();
+        pool.set_ref_count(meta_index, 2).unwrap();
+
+        // Get via IPC (original buf still alive)
+        let buf2 = pool.get(meta_index).unwrap();
+        let ptr = buf2.as_cuda_ptr().unwrap();
+        assert!(ptr > 0);
+    }
+
+    #[test]
+    fn test_preallocate_cuda() {
+        let name = unique_name();
+        let pool = BufferPool::create(&name).unwrap();
+
+        let indices = pool.preallocate_cuda(1024, 3, 0).unwrap();
+        assert_eq!(indices.len(), 3);
+
+        for &idx in &indices {
+            assert_eq!(pool.ref_count(idx).unwrap(), 1);
+        }
+    }
+}
