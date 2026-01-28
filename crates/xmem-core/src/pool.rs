@@ -9,15 +9,16 @@
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // 创建新池
-//! let pool = BufferPool::create("/my_pool")?;
+//! let pool = BufferPool::create("/my_pool_doc")?;
 //!
 //! // 分配 CPU buffer
-//! let mut buf = pool.acquire_cpu(1024)?;
-//! buf.as_cpu_slice_mut()?.copy_from_slice(b"hello");
+//! let mut buf = pool.acquire_cpu(16)?;
+//! buf.as_cpu_slice_mut()?.copy_from_slice(b"hello world!!!!!"); // 16 bytes
 //!
 //! // 获取已存在的 buffer
 //! let buf = pool.get(0)?;
 //! let data = buf.as_cpu_slice()?;
+//! assert_eq!(data, b"hello world!!!!!");
 //! # Ok(())
 //! # }
 //! ```
@@ -44,10 +45,10 @@ const DEFAULT_CAPACITY: usize = 1024;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// // 创建新池
-/// let pool = BufferPool::create("/my_pool")?;
+/// let pool = BufferPool::create("/my_pool_example")?;
 ///
 /// // 分配 buffer
-/// let mut buf = pool.acquire_cpu(1024)?;
+/// let mut buf = pool.acquire_cpu(16)?;
 /// let idx = buf.meta_index();
 ///
 /// // 传递 idx 给其他进程，然后打开

@@ -14,7 +14,7 @@ integration = ["dep:nix"]
 [dependencies]
 shared_memory = "0.12"
 cudarc = { version = "0.12", optional = true }
-nix = { version = "0.28", optional = true }
+nix = { version = "0.28", optional = true, features = ["fs", "process"] }
 thiserror = "2"
 
 [dev-dependencies]

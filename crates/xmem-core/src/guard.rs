@@ -8,11 +8,11 @@
 //! use xmem_core::BufferPool;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let pool = BufferPool::create("/my_pool")?;
+//! let pool = BufferPool::create("/my_pool_guard_doc")?;
 //!
 //! {
-//!     let mut buf = pool.acquire_cpu(1024)?;
-//!     buf.as_cpu_slice_mut()?.copy_from_slice(b"hello");
+//!     let mut buf = pool.acquire_cpu(16)?;
+//!     buf.as_cpu_slice_mut()?.copy_from_slice(b"hello world!!!!!"); // 16 bytes
 //!     // Drop 时自动释放引用
 //! }
 //! # Ok(())
@@ -34,14 +34,14 @@ use std::sync::atomic::{AtomicI32, Ordering};
 /// use xmem_core::BufferPool;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let pool = BufferPool::create("/my_pool")?;
+/// let pool = BufferPool::create("/my_pool_guard_doc2")?;
 ///
 /// // 分配 buffer
-/// let mut buf = pool.acquire_cpu(1024)?;
+/// let mut buf = pool.acquire_cpu(16)?;
 /// let idx = buf.meta_index();
 ///
 /// // 写入数据
-/// buf.as_cpu_slice_mut()?.copy_from_slice(b"hello");
+/// buf.as_cpu_slice_mut()?.copy_from_slice(b"hello world!!!!!"); // 16 bytes
 ///
 /// // 传递所有权给其他进程
 /// buf.forget();

@@ -33,13 +33,13 @@ use shared_memory::{Shmem, ShmemConf};
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// // 创建
-/// let mut shm = SharedMemory::create("/test", 1024)?;
+/// let mut shm = SharedMemory::create("/test_shm_doc", 1024)?;
 ///
 /// // 写入
-/// shm.as_mut_slice()?.copy_from_slice(b"data");
+/// shm.as_mut_slice()[..4].copy_from_slice(b"data");
 ///
 /// // 读取
-/// assert_eq!(shm.as_slice(), b"data");
+/// assert_eq!(&shm.as_slice()[..4], b"data");
 /// # Ok(())
 /// # }
 /// ```
