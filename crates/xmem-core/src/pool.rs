@@ -30,6 +30,7 @@ use crate::shm::SharedMemory;
 use crate::storage::{AccessMode, StorageType};
 use crate::{Error, Result};
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 /// Default metadata region capacity
 const DEFAULT_CAPACITY: usize = 1024;
@@ -124,6 +125,24 @@ impl BufferPool {
     /// Generate buffer shm name
     fn buffer_shm_name(&self, meta_index: u32) -> String {
         format!("{}_buf_{}", self.name, meta_index)
+    }
+
+    /// Acquire a buffer, blocking if pool is full
+    pub fn acquire_cpu_blocking(&self, size: usize, timeout: Duration) -> Result<BufferGuard> {
+        let start = std::time::Instant::now();
+
+        loop {
+            match self.acquire_cpu(size) {
+                Ok(buf) => return Ok(buf),
+                Err(Error::SharedMemory(msg)) if msg.contains("full") => {
+                    if start.elapsed() >= timeout {
+                        return Err(Error::Timeout);
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     /// Acquire a new CPU buffer
@@ -488,6 +507,42 @@ mod tests {
 
         // Now try_release should recycle
         assert!(pool.try_release(idx).unwrap());
+    }
+
+    #[test]
+    fn test_acquire_blocking_timeout() {
+        let name = unique_name();
+        let pool = BufferPool::create_with_capacity(&name, 1).unwrap();
+
+        // Fill the pool
+        let _buf = pool.acquire_cpu(1024).unwrap();
+
+        // Try to acquire with timeout - should fail
+        let result = pool.acquire_cpu_blocking(1024, Duration::from_millis(50));
+        assert!(matches!(result, Err(Error::Timeout)));
+    }
+
+    #[test]
+    fn test_acquire_blocking_success() {
+        use std::thread;
+
+        let name = unique_name();
+        let pool = BufferPool::create_with_capacity(&name, 1).unwrap();
+
+        // Fill the pool
+        let buf = pool.acquire_cpu(1024).unwrap();
+
+        // Spawn thread to release after delay
+        let pool_name = name.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            drop(buf);
+        });
+
+        // This should succeed after the buffer is released
+        let pool2 = BufferPool::open(&pool_name).unwrap();
+        let result = pool2.acquire_cpu_blocking(1024, Duration::from_millis(100));
+        assert!(result.is_ok());
     }
 }
 

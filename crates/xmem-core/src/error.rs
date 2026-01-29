@@ -22,6 +22,9 @@ pub enum Error {
     #[error("invalid shape: {0}")]
     InvalidShape(String),
 
+    #[error("Operation timed out")]
+    Timeout,
+
     #[cfg(feature = "cuda")]
     #[error("CUDA error: {0}")]
     Cuda(String),
