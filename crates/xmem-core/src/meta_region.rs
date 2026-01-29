@@ -85,9 +85,35 @@ impl MetaRegion {
         self.capacity
     }
 
-    /// Allocate a new buffer slot, returns meta_index
+    /// Get header reference
+    fn header(&self) -> &MetaRegionHeader {
+        unsafe { &*(self.shm.as_ptr() as *const MetaRegionHeader) }
+    }
+
+    /// Allocate a buffer slot, returns meta_index
     pub fn alloc(&self) -> Result<u32> {
-        let header = unsafe { &*(self.shm.as_ptr() as *const MetaRegionHeader) };
+        let header = self.header();
+
+        // Try to get from free list first
+        loop {
+            let head = header.free_head.load(Ordering::Acquire);
+            if head == u32::MAX {
+                break; // Free list empty
+            }
+
+            let meta = self.get(head)?;
+            let next = meta.next_free.load(Ordering::Acquire);
+
+            if header.free_head
+                .compare_exchange_weak(head, next, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                header.allocated.fetch_add(1, Ordering::SeqCst);
+                return Ok(head);
+            }
+        }
+
+        // Free list empty, allocate new slot
         let id = header.next_id.fetch_add(1, Ordering::SeqCst);
 
         if id >= self.capacity as u32 {
@@ -95,7 +121,34 @@ impl MetaRegion {
             return Err(Error::SharedMemory("metadata region full".to_string()));
         }
 
+        header.allocated.fetch_add(1, Ordering::SeqCst);
         Ok(id)
+    }
+
+    /// Free a buffer slot, add to free list
+    pub fn free(&self, index: u32) -> Result<()> {
+        if index >= self.capacity as u32 {
+            return Err(Error::BufferNotFound(index));
+        }
+
+        let header = self.header();
+        let meta = self.get(index)?;
+
+        // Add to free list head (lock-free CAS)
+        loop {
+            let old_head = header.free_head.load(Ordering::Acquire);
+            meta.next_free.store(old_head, Ordering::Release);
+
+            if header.free_head
+                .compare_exchange_weak(old_head, index, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                break;
+            }
+        }
+
+        header.allocated.fetch_sub(1, Ordering::SeqCst);
+        Ok(())
     }
 
     /// Get metadata by index
