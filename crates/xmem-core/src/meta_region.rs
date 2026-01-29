@@ -16,10 +16,18 @@ struct MetaRegionHeader {
     capacity: u32,
     /// Next buffer ID to allocate
     next_id: AtomicU32,
+    /// Number of allocated buffers (for stats)
+    allocated: AtomicU32,
+    /// Free list head index (u32::MAX = empty)
+    free_head: AtomicU32,
+    /// Waiter count for backpressure
+    waiters: AtomicU32,
+    /// Reserved for future use
+    _reserved: [u32; 1],
 }
 
 const MAGIC: u32 = 0x584D454D; // "XMEM"
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 /// Shared metadata region
 pub struct MetaRegion {
@@ -44,6 +52,10 @@ impl MetaRegion {
         header.version = VERSION;
         header.capacity = capacity as u32;
         header.next_id = AtomicU32::new(0);
+        header.allocated = AtomicU32::new(0);
+        header.free_head = AtomicU32::new(u32::MAX); // Empty free list
+        header.waiters = AtomicU32::new(0);
+        header._reserved = [0; 1];
 
         Ok(Self { shm, capacity })
     }
