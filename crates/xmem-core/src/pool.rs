@@ -153,7 +153,7 @@ impl BufferPool {
             meta_index,
             AccessMode::ReadWrite,
             ref_count_ptr,
-        ))
+        ).with_pool(self.name.clone()))
     }
 
     /// Get an existing buffer (read-only)
@@ -201,7 +201,8 @@ impl BufferPool {
             }
         };
 
-        Ok(BufferGuard::new(data, meta_index, mode, ref_count_ptr))
+        Ok(BufferGuard::new(data, meta_index, mode, ref_count_ptr)
+            .with_pool(self.name.clone()))
     }
 
     /// Set reference count for a buffer
@@ -302,7 +303,7 @@ impl BufferPool {
             meta_index,
             AccessMode::ReadWrite,
             ref_count_ptr,
-        ))
+        ).with_pool(self.name.clone()))
     }
 
     /// Preallocate CUDA buffers

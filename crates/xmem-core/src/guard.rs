@@ -66,6 +66,8 @@ pub struct BufferGuard {
     ref_count: *const AtomicI32,
     /// Whether this guard owns the release responsibility
     should_release: bool,
+    /// Pool name for recycling (optional, only set by pool)
+    pool_name: Option<String>,
 }
 
 // Safety: BufferGuard can be sent between threads
@@ -86,7 +88,14 @@ impl BufferGuard {
             mode,
             ref_count,
             should_release: true,
+            pool_name: None,
         }
+    }
+
+    /// Set pool name for auto-recycling on drop
+    pub(crate) fn with_pool(mut self, pool_name: String) -> Self {
+        self.pool_name = Some(pool_name);
+        self
     }
 
     /// 获取元数据索引
@@ -178,7 +187,20 @@ impl BufferGuard {
 impl Drop for BufferGuard {
     fn drop(&mut self) {
         if self.should_release && self.data.is_some() {
-            self.release();
+            if !self.ref_count.is_null() {
+                let ref_count = unsafe { &*self.ref_count };
+                let old = ref_count.fetch_sub(1, Ordering::SeqCst);
+
+                // If ref_count reaches 0 and we have pool info, recycle
+                if old == 1 {
+                    if let Some(pool_name) = &self.pool_name {
+                        // Try to recycle - open pool and release
+                        if let Ok(pool) = crate::BufferPool::open(pool_name) {
+                            let _ = pool.release_buffer(self.meta_index);
+                        }
+                    }
+                }
+            }
         }
     }
 }
