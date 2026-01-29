@@ -436,6 +436,59 @@ mod tests {
             assert_eq!(pool.ref_count(idx).unwrap(), 1);
         }
     }
+
+    #[test]
+    fn test_buffer_recycle() {
+        let name = unique_name();
+        let pool = BufferPool::create_with_capacity(&name, 3).unwrap();
+
+        // Allocate all 3 slots
+        let buf0 = pool.acquire_cpu(1024).unwrap();
+        let buf1 = pool.acquire_cpu(1024).unwrap();
+        let buf2 = pool.acquire_cpu(1024).unwrap();
+
+        assert_eq!(buf0.meta_index(), 0);
+        assert_eq!(buf1.meta_index(), 1);
+        assert_eq!(buf2.meta_index(), 2);
+
+        // Pool should be full
+        assert!(pool.acquire_cpu(1024).is_err());
+
+        // Drop buf1 - should recycle
+        drop(buf1);
+
+        // Now we can allocate again, should get recycled index
+        let buf3 = pool.acquire_cpu(1024).unwrap();
+        assert_eq!(buf3.meta_index(), 1);  // Recycled!
+    }
+
+    #[test]
+    fn test_buffer_recycle_with_multiple_refs() {
+        let name = unique_name();
+        let pool = BufferPool::create_with_capacity(&name, 2).unwrap();
+
+        // Allocate
+        let buf0 = pool.acquire_cpu(1024).unwrap();
+        let idx = buf0.meta_index();
+
+        // Add another reference
+        pool.add_ref(idx).unwrap();
+        assert_eq!(pool.ref_count(idx).unwrap(), 2);
+
+        // Drop first ref
+        drop(buf0);
+        assert_eq!(pool.ref_count(idx).unwrap(), 1);
+
+        // Buffer should NOT be recycled yet
+        let buf1 = pool.acquire_cpu(1024).unwrap();
+        assert_eq!(buf1.meta_index(), 1);  // New slot, not recycled
+
+        // Release second ref manually
+        pool.release(idx).unwrap();
+
+        // Now try_release should recycle
+        assert!(pool.try_release(idx).unwrap());
+    }
 }
 
 #[cfg(all(test, feature = "cuda"))]
