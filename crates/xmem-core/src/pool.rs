@@ -229,6 +229,26 @@ impl BufferPool {
         Ok(meta.ref_count.load(Ordering::SeqCst))
     }
 
+    /// Release a buffer back to the pool (called when ref_count reaches 0)
+    pub fn release_buffer(&self, meta_index: u32) -> Result<()> {
+        // Note: SharedMemory for buffer data is NOT unlinked
+        // It will be reused when this meta_index is allocated again
+        self.meta_region.free(meta_index)
+    }
+
+    /// Check if a buffer should be released (ref_count == 0)
+    pub fn try_release(&self, meta_index: u32) -> Result<bool> {
+        let meta = self.meta_region.get(meta_index)?;
+        let ref_count = meta.ref_count.load(Ordering::SeqCst);
+
+        if ref_count <= 0 {
+            self.release_buffer(meta_index)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     /// Preallocate CPU buffers
     pub fn preallocate_cpu(&self, size: usize, count: usize) -> Result<Vec<u32>> {
         let mut indices = Vec::with_capacity(count);
