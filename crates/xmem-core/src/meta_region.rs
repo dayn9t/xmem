@@ -247,4 +247,54 @@ mod tests {
         assert!(region.alloc().is_ok());
         assert!(region.alloc().is_err()); // Full
     }
+
+    #[test]
+    fn test_free_and_reuse() {
+        let name = unique_name();
+        let region = MetaRegion::create(&name, 10).unwrap();
+
+        // Allocate 3 slots
+        let idx0 = region.alloc().unwrap();
+        let idx1 = region.alloc().unwrap();
+        let idx2 = region.alloc().unwrap();
+        assert_eq!(idx0, 0);
+        assert_eq!(idx1, 1);
+        assert_eq!(idx2, 2);
+
+        // Free middle one
+        region.free(idx1).unwrap();
+
+        // Next alloc should reuse idx1
+        let idx3 = region.alloc().unwrap();
+        assert_eq!(idx3, 1); // Reused!
+
+        // Next alloc should be new
+        let idx4 = region.alloc().unwrap();
+        assert_eq!(idx4, 3);
+    }
+
+    #[test]
+    fn test_free_all_and_reuse() {
+        let name = unique_name();
+        let region = MetaRegion::create(&name, 3).unwrap();
+
+        // Fill up
+        let idx0 = region.alloc().unwrap();
+        let idx1 = region.alloc().unwrap();
+        let idx2 = region.alloc().unwrap();
+        assert!(region.alloc().is_err()); // Full
+
+        // Free all
+        region.free(idx0).unwrap();
+        region.free(idx1).unwrap();
+        region.free(idx2).unwrap();
+
+        // Should be able to allocate again (LIFO order)
+        let new0 = region.alloc().unwrap();
+        let new1 = region.alloc().unwrap();
+        let new2 = region.alloc().unwrap();
+        assert_eq!(new0, 2); // LIFO: last freed first
+        assert_eq!(new1, 1);
+        assert_eq!(new2, 0);
+    }
 }
