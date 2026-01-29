@@ -41,8 +41,10 @@ pub struct BufferMeta {
     pub producer: [u8; 32],
     /// CUDA IPC handle (预留，仅 storage_type == 1 时有效)
     pub cuda_ipc_handle: [u8; CUDA_IPC_HANDLE_SIZE],
+    /// Next free buffer index (for free list, u32::MAX = end)
+    pub next_free: AtomicU32,
     /// Reserved for future use
-    pub reserved: [u8; 64],
+    pub reserved: [u8; 60],
 }
 
 impl BufferMeta {
